@@ -1,5 +1,7 @@
 library(tidyverse)
 library(scales)
+library(ggbio)
+library(GenomicRanges)
 
 # Load the haplotype data:
 data_dir <- "." # change to the directory with HAP/LEGEND/SAMPLE files which were returned by "01-Preprocess_1000G_haplotypes.sh"
@@ -31,6 +33,30 @@ hap_star1 <- hap_star1[!rownames(hap_star1) %in% c(m1, m2), ] # 285845 x 2932
 rmn <- rowMeans(hap_star1)
 hap_star1 <- hap_star1[rmn != 0 & rmn != 1, ] # 220112 x 2932
 
+# For multiallelic SNPs, add NAs to the haplotype matrix:
+rs <- rownames(hap_star1) %>% str_split(":") %>% lapply(`[`, 1) %>% unlist()
+dupl <- duplicated(rs) | duplicated(rs, fromLast = TRUE)
+old_rownames <- rownames(hap_star1)
+rownames(hap_star1) <- 1:nrow(hap_star1)
+hap_bi <- hap_star1[!dupl, ]
+hap_multi <- hap_star1[dupl, ]
+rs_dupl <- rs[dupl]
+idx <- order(rs_dupl)
+rs_dupl <- rs_dupl[idx]
+hap_multi <- hap_multi[idx, ]
+idx2 <- split(1:nrow(hap_multi), rs_dupl)
+
+add_na_to_hap <- function(idx, mat) {
+  mat2 <- mat[idx, ]
+  out <- apply(mat2, 2, function(vec) { if (sum(vec) > 0) vec[vec == 0] <- NA; return(vec) })
+  return(out)
+}
+
+hap_multi_na <- lapply(idx2, add_na_to_hap, mat = hap_multi) %>% do.call(rbind, .)
+hap_star1 <- rbind(hap_bi, hap_multi_na)
+hap_star1 <- hap_star1[order(as.integer(rownames(hap_star1))), ]
+rownames(hap_star1) <- old_rownames
+
 ### Define custom functions ----------------------------------------------------------------------------------
 
 calculate_padj <- function(hap, grp, g1, g2, method = "fisher") {
@@ -40,12 +66,14 @@ calculate_padj <- function(hap, grp, g1, g2, method = "fisher") {
   h2 <- hap[, grp == g2]
   message(ncol(h1), " ", g1, " vs ", ncol(h2), " ", g2, " haplotypes;")
   # Count frequency of each SNP in these two groups:
-  k1 <- rowSums(h1) %>% as.integer()
-  n1 <- ncol(h1)
+  k1 <- rowSums(h1, na.rm = TRUE) %>% as.integer()
+  n1 <- rowSums(!is.na(h1))
   freq1 <- round(k1 / n1, 3)
-  k2 <- rowSums(h2) %>% as.integer()
-  n2 <- ncol(h2)
+  freq1 <- ifelse(is.na(freq1), 0, freq1)
+  k2 <- rowSums(h2, na.rm = TRUE) %>% as.integer()
+  n2 <- rowSums(!is.na(h2))
   freq2 <- round(k2 / n2, 3)
+  freq2 <- ifelse(is.na(freq2), 0, freq2)
   # Calculate p-values:
   if (method == "fisher") {
     pvals <- mapply(function(k1, n1, k2, n2) { fisher.test(x = rbind(c(k1, n1 - k1), c(k2, n2 - k2)))$p.value }, k1, n1, k2, n2, SIMPLIFY = FALSE) %>% unlist()
@@ -83,10 +111,13 @@ tbl <- get_results(hap_star1, grp)
 tbl$mllk <- ifelse(tbl$mllk > ymax, ymax, tbl$mllk)
 tbl$gt <- tbl$gt %>% as.factor() %>% relevel(ref = "TA vs TG")
 
+cyp2c18 <- GRanges("chr10", IRanges(96443251, 96495947)) %>% as("GRangesList")
+cyp2c19 <- GRanges("chr10", IRanges(96522463, 96612671)) %>% as("GRangesList")
+hline <- tbl %>% filter(gt == "TA vs TG") %>% arrange(mllk) %>% tail(40) %>% head(1) %>% .$mllk
+
 p <- ggplot(tbl, aes(x = coord, y = mllk, colour = dir)) + geom_point(size = 1) + 
   scale_colour_manual(values = cbp[c(1, 6, 7)]) + 
-  scale_x_continuous(labels = format_format(big.mark = ".", decimal.mark = ",", scientific = FALSE), 
-                     limits = c(xmin, xmax)) + 
+  scale_x_continuous(labels = scales::format_format(big.mark = ".", decimal.mark = ",", scientific = FALSE)) + 
   xlab("chr10") + 
   ylab("-log10(padj)") + 
   ylim(0, ymax) + 
@@ -96,7 +127,11 @@ p <- ggplot(tbl, aes(x = coord, y = mllk, colour = dir)) + geom_point(size = 1) 
         legend.title = element_blank(), 
         text = element_text(size = 12), 
         axis.text.x = element_text(size = 8), 
-        axis.text.y = element_text(size = 8))
+        axis.text.y = element_text(size = 8)) + 
+  geom_hline(data = filter(tbl, gt == "TA vs TG"), aes(yintercept = hline), linetype = "dotted")
+
+p <- tracks(p, CYP2C18 = cyp2c18, CYP2C19 = cyp2c19, heights = c(20, 1, 1), 
+            xlim = GRanges("chr10", IRanges(xmin, xmax)), label.text.angle = 0, label.text.cex = 0.5)
 
 ggsave("Fig_S2.tiff", plot = p, width = 180, height = 150, units = "mm", dpi = 300)
 
@@ -112,4 +147,31 @@ write_tsv(big, "All_variable_SNPs_in_10Mb_window.txt.gz") # for convenience, thi
 
 # 2) Small table of the most significant SNPs in TA vs TG comparison (Supplementary File S2):
 small <- big %>% filter(mllk_TA_TG >= 50) %>% select(id, freq_TA, freq_TG, mllk_TA_TG) %>% mutate(mllk_TA_TG = round(mllk_TA_TG, 3), enrichment = round(freq_TA / freq_TG, 3))
+
+# Calculate r2 with rs2860840 and rs11188059:
+hap_small <- hap_star1[rownames(hap_star1) %in% small$id, ]
+hap_small <- hap_small[order(rownames(hap_small)), ]
+
+calc_r2 <- function(v1, v2) {
+  stopifnot(length(v1) == length(v2))
+  na <- is.na(v1) | is.na(v2)
+  if (sum(na) > 0) {
+    v1 <- v1[!na]
+    v2 <- v2[!na]
+  }
+  r2 <- unname(chisq.test(v1, v2, correct = FALSE)$statistic) / length(v1)
+  return(r2)
+}
+
+r2_m1 <- vector("numeric", nrow(small))
+r2_m2 <- vector("numeric", nrow(small))
+for (i in 1:nrow(hap_small)) {
+  vec <- hap_small[i, ]
+  r2_m1[[i]] <- calc_r2(vec, hap_m1)
+  r2_m2[[i]] <- calc_r2(vec, hap_m2)
+}
+
+small$r2_rs2860840 <- round(r2_m1, 3)
+small$r2_rs11188059 <- round(r2_m2, 3)
+
 write_tsv(small, "File_S2.txt")
