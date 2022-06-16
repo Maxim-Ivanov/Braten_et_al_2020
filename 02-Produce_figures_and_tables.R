@@ -9,6 +9,8 @@ hap <- file.path(data_dir, "CYP2C19_10Mb_ALL.hap.gz") %>% read_delim(delim = " "
 legend <- file.path(data_dir, "CYP2C19_10Mb_ALL.legend.gz") %>% read_delim(delim = " ")
 legend_id <- legend %>% unite(id, id, position, a0, a1, sep = ":") %>% .$id
 rownames(hap) <- legend_id
+pops <- file.path(data_dir, "integrated_call_samples_v3.20130502.ALL.panel") %>% read_tsv(col_names = FALSE, skip = 1) ###
+colnames(hap) <- pops %>% .$X3 %>% rep(each = 2) # bugfix 2022-06-11: "times" was changes to "each"
 
 # Skip *2-*n haplotypes:
 blacklist <- read_tsv("CYP2C19_blacklist.txt", col_names = FALSE) # this file is available from the same GitHub page
@@ -25,6 +27,11 @@ cg <- hap_m1 == 0 & hap_m2 == 0
 ca <- hap_m1 == 0 & hap_m2 == 1
 tg <- hap_m1 == 1 & hap_m2 == 0
 grp <- ifelse(cg, "CG", ifelse(ca, "CA", ifelse(tg, "TG", "TA")))
+
+# Save haplotype counts:
+mat <- table(colnames(hap_star1), grp) %>% as.matrix() ###
+names(dimnames(mat)) <- NULL ###
+write.table(mat, "Table_2_(star1_only).txt", sep = "\t") ###
 
 # Skip both mutations from the haplotype table:
 hap_star1 <- hap_star1[!rownames(hap_star1) %in% c(m1, m2), ] # 285845 x 2932
@@ -130,8 +137,10 @@ p <- ggplot(tbl, aes(x = coord, y = mllk, colour = dir)) + geom_point(size = 1) 
         axis.text.y = element_text(size = 8)) + 
   geom_hline(data = filter(tbl, gt == "TA vs TG"), aes(yintercept = hline), linetype = "dotted")
 
-p <- tracks(p, CYP2C18 = cyp2c18, CYP2C19 = cyp2c19, heights = c(20, 1, 1), 
-            xlim = GRanges("chr10", IRanges(xmin, xmax)), label.text.angle = 0, label.text.cex = 0.5)
+p <- p + xlim(xmin, xmax)
+p2 <- ggbio::autoplot(cyp2c18, geom = "rect")
+p3 <- ggbio::autoplot(cyp2c19, geom = "rect")
+p <- tracks(p, CYP2C18 = p2, CYP2C19 = p3, heights = c(20, 1, 1), label.text.angle = 0, label.text.cex = 0.5)
 
 ggsave("Fig_S2.tiff", plot = p, width = 180, height = 150, units = "mm", dpi = 300)
 
